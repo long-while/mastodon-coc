@@ -2,15 +2,37 @@
 CoC 응답 메시지 포매터
 
 판정 결과(CheckOutcome), 무기 공격 결과, 스탯 변동 결과를 사용자용 한국어
-문자열로 변환한다. 마스토돈은 마크다운을 렌더링하지 않으므로 별표 등 장식
-기호는 사용하지 않는다.
+문자열로 변환한다.
 
-기본 출력 형식:
+`Config.MARKDOWN_ENABLED=False` (기본): 마스토돈 본가는 Markdown 을 렌더링하지
+않으므로 별표 등 장식 기호 없이 평문으로 출력.
 
-    회피
+`Config.MARKDOWN_ENABLED=True` (한참 등): 기능명/판정결과/피해 값을 `**볼드**`
+로 감싼다.
+
+기능명/무기명은 `Config.DECORATION_CHAR` 로 장식 — 양옆에 모두 붙일지
+앞에만 붙일지는 `Config.DECORATION_BOTH_SIDES` 가 결정. RESPONSE_PREFIX 의
+같은 문자와 중복되지 않도록 `Config.format_response` 가 메시지 선두 장식
+문자를 감지해 프리픽스 부착을 생략한다.
+
+기본 출력 형식 (DECORATION_CHAR=✦, BOTH_SIDES=True, 마크다운 OFF):
+
+    ✦ 회피 ✦
     기준치: 77 / 38 / 15
     굴림: 17
     판정결과: 어려운 성공
+
+마크다운 ON:
+
+    ✦ **회피** ✦
+    기준치: 77 / 38 / 15
+    굴림: 17
+    판정결과: **어려운 성공**
+
+BOTH_SIDES=False:
+
+    ✦ 회피
+    기준치: ...
 
 무기 판정은 위 블록 뒤에 빈 줄과 `피해: <값>` 을 추가한다. 실패/대실패 시
 피해 줄은 생략.
@@ -20,8 +42,32 @@ from __future__ import annotations
 
 from typing import Optional
 
+from config.settings import config
+
 from .check_engine import CheckOutcome
 from .damage_engine import DamageRoll
+
+
+def _bold(text: str) -> str:
+    """`Config.MARKDOWN_ENABLED` 가 켜졌을 때만 `**…**` 로 감싼다."""
+    if not config.MARKDOWN_ENABLED:
+        return text
+    return f"**{text}**"
+
+
+def _decorate_title(title_with_suffix: str) -> str:
+    """장식 문자로 제목 라인 양옆/앞을 감싼다.
+
+    `DECORATION_CHAR=''`           → `{title}`               (장식 생략)
+    `DECORATION_BOTH_SIDES=True`   → `{char} {title} {char}` (양옆)
+    `DECORATION_BOTH_SIDES=False`  → `{char} {title}`        (앞에만)
+    """
+    char = config.DECORATION_CHAR
+    if not char:
+        return title_with_suffix
+    if config.DECORATION_BOTH_SIDES:
+        return f"{char} {title_with_suffix} {char}"
+    return f"{char} {title_with_suffix}"
 
 
 def _modifier_suffix(modifier: int) -> str:
@@ -55,10 +101,10 @@ def _format_check_block(
     roll_suffix = _roll_detail(outcome)
 
     return (
-        f"{title}{mod_suffix}\n"
+        f"{_decorate_title(f'{_bold(title)}{mod_suffix}')}\n"
         f"기준치: {t.regular} / {t.hard} / {t.extreme}\n"
         f"굴림: {outcome.rolled.d100}{roll_suffix}\n"
-        f"판정결과: {outcome.result.label}"
+        f"판정결과: {_bold(outcome.result.label)}"
     )
 
 
@@ -90,7 +136,7 @@ def format_weapon_attack(
     block = _format_check_block(weapon_name, outcome)
 
     if outcome.result.is_success:
-        return f"{block}\n\n피해: {total_damage}"
+        return f"{block}\n\n피해: {_bold(str(total_damage))}"
 
     return block
 

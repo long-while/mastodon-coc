@@ -74,13 +74,41 @@ HEALTHCHECK_INTERVAL_SECONDS: int = 60
 # 응답
 # ----------------------------------------------------------------------
 
-RESPONSE_PREFIX: str = "✦\n"
-"""응답 프리픽스 기본값. 끝의 `\\n` 으로 본문이 다음 줄에서 시작 — 멘션 라인과
-응답 본문이 시각적으로 분리되어 가독성↑.
+DECORATION_CHAR: str = "✦"
+"""판정 출력 장식용 특수문자 기본값.
 
-  @user ✦
-  관찰력
+설치 마법사에서 사용자가 다른 문자(★, ✧, 💎 등)로 변경 가능.
+환경 변수 `DECORATION_CHAR` 로 오버라이드.
+"""
+
+DECORATION_BOTH_SIDES: bool = True
+"""판정 제목의 양옆에 `DECORATION_CHAR` 를 모두 붙일지(`True`) 앞에만 붙일지(`False`).
+
+`True`  → `✦ 관찰력 ✦`
+`False` → `✦ 관찰력`
+
+환경 변수 `DECORATION_BOTH_SIDES=true|false` 로 오버라이드.
+"""
+
+RESPONSE_PREFIX: str = "\n"
+"""응답 프리픽스 기본값. 단순 개행 한 칸 — 멘션과 본문 사이에 줄바꿈을 강제해
+다음과 같이 렌더링되도록 한다:
+
+  @user
+  ✦ 관찰력 ✦
   기준치: ...
+
+장식 문자(`DECORATION_CHAR`)는 본문 안에서 처리되므로 프리픽스 자체는
+멘션 분리 용도로만 쓰인다. 사용자가 직접 `RESPONSE_PREFIX` 환경 변수를
+지정하면 이 기본값을 덮어쓴다.
+"""
+
+MARKDOWN_ENABLED: bool = False
+"""마스토돈 서버가 Markdown(`*기울임*`/`**볼드**`)을 렌더링하는지 여부.
+
+`True` 인 경우 판정 출력의 기능명/판정결과/피해 값이 `**볼드**` 로 감싸져
+나간다. 한참(hub.hanp.us) 등 일부 인스턴스만 지원하므로 기본값은 `False`.
+환경 변수 `MARKDOWN_ENABLED=true` 로 활성화.
 """
 
 DEFAULT_HELP_SHEET: str = "도움말"

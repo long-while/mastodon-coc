@@ -173,6 +173,8 @@ prompt_config() {
     echo
 
     local mast_url mast_token max_len admin coc_id rt_id custom_id
+    local markdown_input markdown_enabled
+    local decoration_input decoration_char decoration_pos decoration_both
 
     echo "${BOLD}1) 마스토돈 서버 주소${RESET}"
     echo "   - https:// 를 제외하고 example.com 부분만 작성하세요."
@@ -230,6 +232,75 @@ prompt_config() {
     fi
     echo
 
+    echo "${BOLD}8) 서버가 Markdown 형식(${RESET}*기울임꼴*${BOLD}/${RESET}**볼드체**${BOLD} 등)을 지원하나요?${RESET}"
+    echo "   - 한참 인스턴스는 지원하므로 y를 입력해주세요."
+    echo "   - 그 외의 서버는 n을 입력해주세요."
+    markdown_input="$(sanitize_no_space "$(read_line '   > (y/n) ')")"
+    case "${markdown_input,,}" in
+        y|yes|true|1)
+            markdown_enabled=true
+            ;;
+        n|no|false|0|"")
+            markdown_enabled=false
+            ;;
+        *)
+            warn "y/n 이 아닌 값이 입력됨 — 기본값 false 사용"
+            markdown_enabled=false
+            ;;
+    esac
+    echo "   ↳ ${CYAN}MARKDOWN_ENABLED=${markdown_enabled}${RESET}"
+    echo
+
+    echo "${BOLD}9) 자동봇 결과 출력 시 붙는 특수문자는 무엇으로 지정할까요?${RESET}"
+    echo "   - ✦ 관찰력 ✦ 이렇게 출력됩니다."
+    echo "   - 기본 ✦ 을 사용하고 싶으시면 엔터를 눌러주세요."
+    echo "   - 다른 특수문자를 사용하고 싶으시면 인터넷에서 원하시는 특수문자를"
+    echo "     복사하신 후 입력란에 붙여넣으세요."
+    echo "   - 특수문자를 생략하고 싶으시면 ${BOLD}no${RESET} 라고 입력해 주세요."
+    decoration_input="$(read_line '   > ')"
+    # 양 끝 공백만 제거 (사용자가 붙여넣은 특수문자는 그대로 보존)
+    decoration_input="${decoration_input#"${decoration_input%%[![:space:]]*}"}"
+    decoration_input="${decoration_input%"${decoration_input##*[![:space:]]}"}"
+    case "${decoration_input,,}" in
+        no)
+            decoration_char=""
+            echo "   ↳ ${CYAN}장식 문자 생략${RESET}"
+            ;;
+        "")
+            decoration_char="✦"
+            echo "   ↳ ${CYAN}DECORATION_CHAR=✦ (기본값)${RESET}"
+            ;;
+        *)
+            decoration_char="${decoration_input}"
+            echo "   ↳ ${CYAN}DECORATION_CHAR=${decoration_char}${RESET}"
+            ;;
+    esac
+    echo
+
+    if [[ -n "$decoration_char" ]]; then
+        echo "${BOLD}10) 자동봇 결과 출력 시 특수문자가 판정 기능치의 앞에만 붙을까요, 양 옆에 붙을까요?${RESET}"
+        echo "   - ${decoration_char} 관찰력 ${decoration_char} 을 원하시면 ${BOLD}2${RESET} 를 입력하고 엔터"
+        echo "   - ${decoration_char} 관찰력 을 원하시면 ${BOLD}1${RESET} 을 입력하고 엔터"
+        decoration_pos="$(sanitize_no_space "$(read_line '   > (1/2) ')")"
+        case "${decoration_pos}" in
+            1)
+                decoration_both=false
+                ;;
+            2|"")
+                decoration_both=true
+                ;;
+            *)
+                warn "1/2 가 아닌 값이 입력됨 — 기본값 2 (양옆) 사용"
+                decoration_both=true
+                ;;
+        esac
+        echo "   ↳ ${CYAN}DECORATION_BOTH_SIDES=${decoration_both}${RESET}"
+        echo
+    else
+        # 장식 문자 생략 시 위치 옵션은 의미 없음 — 기본값으로 기록만 함.
+        decoration_both=true
+    fi
+
     cat > "$INSTALL_DIR/.env" <<EOF
 # CoC 봇 설정 (install.sh 로 자동 생성)
 
@@ -241,6 +312,10 @@ MAX_MESSAGE_LENGTH=${max_len}
 
 RANDOM_TABLE_SHEET_ID=${rt_id}
 CUSTOM_COMMAND_SHEET_ID=${custom_id}
+
+MARKDOWN_ENABLED=${markdown_enabled}
+DECORATION_CHAR=${decoration_char}
+DECORATION_BOTH_SIDES=${decoration_both}
 
 OPERATION_START_DATE=
 OPERATION_END_DATE=

@@ -40,15 +40,35 @@ def _env_int(key: str, default: int) -> int:
         return default
 
 
+def _resolve_decoration_char() -> str:
+    """`DECORATION_CHAR` 환경 변수를 해석.
+
+    - 미설정(None) → 기본값(✦)
+    - 빈 문자열 또는 공백만 → '' (사용자가 명시적으로 장식 생략)
+    - 그 외 → 공백 제거한 문자열
+    """
+    raw = os.getenv('DECORATION_CHAR')
+    if raw is None:
+        return defaults.DECORATION_CHAR
+    return raw.strip()
+
+
 class Config:
     """CoC 봇 런타임 설정."""
 
     BASE_DIR = Path(__file__).parent.parent
 
     # ------------------------------------------------------------------
-    # 응답 프리픽스
+    # 응답 장식 (특수문자 + 위치)
     # ------------------------------------------------------------------
-    RESPONSE_PREFIX: str = os.getenv('RESPONSE_PREFIX', defaults.RESPONSE_PREFIX)
+    DECORATION_CHAR: str = _resolve_decoration_char()
+    DECORATION_BOTH_SIDES: bool = _env_bool(
+        'DECORATION_BOTH_SIDES', defaults.DECORATION_BOTH_SIDES,
+    )
+
+    # RESPONSE_PREFIX 는 멘션과 본문 사이의 줄바꿈 용도. 장식 문자는 본문 안에서
+    # 처리되므로 프리픽스 자체는 단순 `\n` 이 기본값.
+    RESPONSE_PREFIX: str = os.getenv('RESPONSE_PREFIX') or defaults.RESPONSE_PREFIX
 
     # ------------------------------------------------------------------
     # Mastodon API
@@ -125,6 +145,11 @@ class Config:
     POLLING_INTERVAL: int = _env_int('POLLING_INTERVAL', defaults.POLLING_INTERVAL_SECONDS)
 
     # ------------------------------------------------------------------
+    # 마스토돈 Markdown 렌더링 지원 여부 (한참 등 일부 인스턴스만 지원)
+    # ------------------------------------------------------------------
+    MARKDOWN_ENABLED: bool = _env_bool('MARKDOWN_ENABLED', defaults.MARKDOWN_ENABLED)
+
+    # ------------------------------------------------------------------
     # 디버그
     # ------------------------------------------------------------------
     DEBUG_MODE: bool = _env_bool('DEBUG_MODE', False)
@@ -197,14 +222,23 @@ class Config:
 
     @classmethod
     def format_response(cls, message: str) -> str:
-        """응답에 프리픽스 추가 (이미 있으면 중복 방지)."""
+        """응답 본문 앞에 RESPONSE_PREFIX 부착.
+
+        RESPONSE_PREFIX 가 공백만(`\\n` 등)이면 `prefix.strip()` 이 빈 문자열이 되어
+        `startswith('')` 가 항상 참이 되므로, 그런 경우는 단순히 prepend 만 한다.
+        프리픽스에 가시 문자(예: `✦`)가 있으면, 메시지가 이미 그 문자로 시작할 때
+        중복 부착을 방지한다.
+        """
         if not message or not isinstance(message, str):
             return message
         message = message.strip()
         if not message:
             return message
         prefix = cls.RESPONSE_PREFIX or ''
-        if prefix and message.startswith(prefix.strip()):
+        if not prefix:
+            return message
+        prefix_marker = prefix.strip()
+        if prefix_marker and message.startswith(prefix_marker):
             return message
         return f"{prefix}{message}"
 

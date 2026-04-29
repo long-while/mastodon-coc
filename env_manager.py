@@ -76,6 +76,23 @@ GLOBAL_FIELD_SPECS: Dict[str, FieldSpec] = {
         prompt='가동 종료 날짜 KST YYYY-MM-DD (선택, 비우면 무제한)',
         default='',
     ),
+    'MARKDOWN_ENABLED': FieldSpec(
+        key='MARKDOWN_ENABLED',
+        prompt='서버가 Markdown(*기울임*/**볼드**)을 지원하나요? (y/n)',
+        default='false',
+    ),
+    'DECORATION_CHAR': FieldSpec(
+        key='DECORATION_CHAR',
+        prompt='장식 특수문자 (엔터=✦ 기본 / no=생략 / 다른 문자 붙여넣기)',
+        default='✦',
+    ),
+    'DECORATION_BOTH_SIDES': FieldSpec(
+        key='DECORATION_BOTH_SIDES',
+        prompt='장식 위치 — 1=앞에만 / 2=양옆 (엔터=2)',
+        default='true',
+        # DECORATION_CHAR 가 비어 있으면 위치는 의미가 없으므로 묻지 않음
+        condition=lambda cfg: bool(cfg.get('DECORATION_CHAR', '').strip()),
+    ),
 }
 
 GLOBAL_SECTIONS: Tuple[SectionSpec, ...] = (
@@ -100,7 +117,35 @@ GLOBAL_SECTIONS: Tuple[SectionSpec, ...] = (
         description='KST 기준. 종료 날짜 00:00 KST 부터 만료 안내 후 침묵. 비우면 무기한.',
         keys=('OPERATION_START_DATE', 'OPERATION_END_DATE'),
     ),
+    SectionSpec(
+        title='Markdown 렌더링',
+        description='판정 출력의 기능명/판정결과/피해 값을 **볼드** 로 감싼다. 한참 등 일부 인스턴스만 지원.',
+        keys=('MARKDOWN_ENABLED',),
+    ),
+    SectionSpec(
+        title='응답 장식 (특수문자)',
+        description=(
+            '판정 제목 양옆에 붙는 특수문자. 기본 ✦. '
+            "DECORATION_CHAR 에 'no' 입력 시 생략. "
+            'DECORATION_BOTH_SIDES: 2=양옆, 1=앞에만.'
+        ),
+        keys=('DECORATION_CHAR', 'DECORATION_BOTH_SIDES'),
+    ),
 )
+
+
+_YES_TOKENS = {'y', 'yes', 'true', '1', 't'}
+_NO_TOKENS = {'n', 'no', 'false', '0', 'f', ''}
+
+
+def _normalize_bool_input(raw: str) -> Optional[bool]:
+    """y/n 계열 문자열을 bool 로. 알 수 없으면 None."""
+    token = raw.strip().lower()
+    if token in _YES_TOKENS:
+        return True
+    if token in _NO_TOKENS:
+        return False
+    return None
 
 
 class EnvManager:
@@ -117,6 +162,15 @@ class EnvManager:
 
     def _prompt_field(self, field_spec: FieldSpec) -> None:
         current = self.get_value(field_spec.key, field_spec.default or '')
+        if field_spec.key == 'MARKDOWN_ENABLED':
+            self._prompt_bool_field(field_spec, current)
+            return
+        if field_spec.key == 'DECORATION_CHAR':
+            self._prompt_decoration_char(field_spec, current)
+            return
+        if field_spec.key == 'DECORATION_BOTH_SIDES':
+            self._prompt_decoration_position(field_spec, current)
+            return
         placeholder = current or '입력 필요'
         value = input(f"{field_spec.prompt} [{placeholder}]: ").strip()
         if not value:
@@ -124,6 +178,51 @@ class EnvManager:
         if value is None:
             value = ''
         self.set_value(field_spec.key, value)
+
+    def _prompt_bool_field(self, field_spec: FieldSpec, current: str) -> None:
+        """y/n 입력을 받아 'true'/'false' 로 정규화해 저장."""
+        current_bool = _normalize_bool_input(current)
+        placeholder = 'y' if current_bool else 'n'
+        raw = input(f"{field_spec.prompt} [{placeholder}]: ").strip()
+        if not raw:
+            normalized = current_bool if current_bool is not None else False
+        else:
+            parsed = _normalize_bool_input(raw)
+            if parsed is None:
+                print(f"[경고] '{raw}' 는 인식할 수 없어 기본값({placeholder}) 사용")
+                normalized = current_bool if current_bool is not None else False
+            else:
+                normalized = parsed
+        self.set_value(field_spec.key, 'true' if normalized else 'false')
+
+    def _prompt_decoration_char(self, field_spec: FieldSpec, current: str) -> None:
+        """특수문자 입력. 엔터=현재값(또는 ✦) 유지, 'no'=빈 문자열, 그 외=그대로."""
+        placeholder = current if current else '엔터=✦, no=생략'
+        # 사용자가 붙여넣을 특수문자가 strip 으로 사라지지 않도록 양 끝 공백만 정리.
+        raw = input(f"{field_spec.prompt} [{placeholder}]: ").strip()
+        if not raw:
+            value = current if current else (field_spec.default or '')
+        elif raw.lower() == 'no':
+            value = ''
+        else:
+            value = raw
+        self.set_value(field_spec.key, value)
+
+    def _prompt_decoration_position(self, field_spec: FieldSpec, current: str) -> None:
+        """1=앞에만(false), 2=양옆(true). 엔터/잘못 입력 시 현재값 유지(없으면 양옆)."""
+        current_bool = _normalize_bool_input(current)
+        placeholder = '2' if current_bool is None or current_bool else '1'
+        raw = input(f"{field_spec.prompt} [{placeholder}]: ").strip()
+        if not raw:
+            normalized = current_bool if current_bool is not None else True
+        elif raw == '1':
+            normalized = False
+        elif raw == '2':
+            normalized = True
+        else:
+            print(f"[경고] '{raw}' 는 1/2 가 아니어서 기본값({placeholder}) 사용")
+            normalized = current_bool if current_bool is not None else True
+        self.set_value(field_spec.key, 'true' if normalized else 'false')
 
     def load_existing(self) -> bool:
         if not self.env_path.exists():
