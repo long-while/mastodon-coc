@@ -174,11 +174,16 @@ class BotStreamHandler(mastodon.StreamListener):
             return
 
         # Visibility 정책:
-        # - direct                : direct 로 응답 (DM 그대로)
-        # - public/unlisted/private : 무조건 private (팔로워 전용) 으로 응답
-        # 모든 입력은 처리하되, 응답 노출 범위는 direct 가 아니면 모두 private 로
-        # 좁힌다 — 공개·로컬 타임라인 오염 방지.
-        response_visibility = 'direct' if visibility == 'direct' else 'private'
+        # - direct          : direct 로 응답 (DM 그대로)
+        # - unlisted        : unlisted 로 응답 (로컬/공개 타임라인엔 안 뜨지만 프로필·URL 열람 가능)
+        # - public/private/그 외 : private (팔로워 전용) 으로 응답
+        # 공개(public) 응답은 만들지 않아 공개·로컬 타임라인 오염을 막는다.
+        if visibility == 'direct':
+            response_visibility = 'direct'
+        elif visibility == 'unlisted':
+            response_visibility = 'unlisted'
+        else:
+            response_visibility = 'private'
         if should_log_debug() and visibility != response_visibility:
             logger.debug(
                 f"응답 가시성 다운그레이드: {visibility} → {response_visibility} | user={user_id}"
