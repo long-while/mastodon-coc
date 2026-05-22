@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # install.sh — Debian 12 (bookworm) x64 용 CoC 마스토돈 봇 설치 스크립트
 #
-# 사용법:
-#   curl -fsSL https://raw.githubusercontent.com/long-while/mastodon-coc/main/install.sh | bash
+# 사용법 (계정 권한에 따라 두 가지):
+#
+#   A) sudo 권한이 있는 일반 사용자 (가장 일반적):
+#        curl -fsSL https://raw.githubusercontent.com/long-while/mastodon-coc/main/install.sh | bash
+#
+#   B) root 계정 (예: `sudo su -` 직후, 또는 sudo 권한이 없는 계정에서
+#      root 로 미리 패키지를 깔아둔 뒤 다시 일반 사용자로 돌아와 실행하는 경우):
+#        curl -fsSL https://raw.githubusercontent.com/long-while/mastodon-coc/main/install.sh -o install.sh
+#        bash install.sh
+#
+#   ※ sudo 권한이 전혀 없는 비특권 계정(예: mastodon)에서 직접 실행하면
+#      apt 단계에서 실패합니다. 위 두 방법 중 하나로 실행하세요.
 #
 # 동작:
 #   1) apt 로 git / python3 / python3-venv / python3-pip / tmux / nano 설치 (비대화형)
@@ -30,6 +40,10 @@ APT_OPTS=(
     -o Dpkg::Options::=--force-confdef
     -o Dpkg::Options::=--force-confnew
 )
+
+# 권한 escalation 명령. root 일 때는 비어 있고, 일반 사용자일 때만 (sudo -E).
+# 배열로 두는 이유는 빈 값일 때 안전하게 전개("${SUDO_CMD[@]}")되도록 하기 위함.
+SUDO_CMD=()
 
 # ----------------------------------------------------------------------
 # 출력 헬퍼
@@ -87,6 +101,75 @@ sanitize_id() {
 }
 
 # ----------------------------------------------------------------------
+# 0. 권한 감지 — root / sudo / 권한 없음
+# ----------------------------------------------------------------------
+# 이 스크립트는 apt 로 시스템 패키지를 설치하므로 root 권한이 필요하다.
+# - EUID == 0 (root)            → SUDO_CMD 비움, sudo 없이 진행
+# - 일반 사용자 + sudo 사용 가능 → SUDO_CMD=(sudo -E)
+# - 일반 사용자 + sudo 불가      → 안내 메시지 출력 후 종료 (apt 가 필요한 경우에만)
+setup_privilege() {
+    if [[ $EUID -eq 0 ]]; then
+        SUDO_CMD=()
+        info "root 계정으로 실행 중 — sudo 없이 진행합니다."
+        return 0
+    fi
+
+    if ! command -v sudo >/dev/null 2>&1; then
+        # sudo 명령 자체가 없음 — apt 단계에서 require_root_or_sudo 가 안내한다.
+        return 1
+    fi
+
+    # NOPASSWD 또는 캐싱된 sudo 인증이 있는지 비대화형으로 확인.
+    if sudo -n true 2>/dev/null; then
+        SUDO_CMD=(sudo -E)
+        info "sudo 권한 확인됨 (비밀번호 없이 사용 가능)."
+        return 0
+    fi
+
+    # 비밀번호 입력이 필요한 sudo — TTY 가 있어야 입력 가능.
+    # curl | bash 환경이라도 /dev/tty 가 살아 있으면 sudo 가 거기서 비밀번호를 읽는다.
+    if [[ -r "$TTY_DEV" && -w "$TTY_DEV" ]]; then
+        SUDO_CMD=(sudo -E)
+        info "sudo 사용 시 비밀번호 입력이 필요할 수 있습니다."
+        return 0
+    fi
+
+    # sudo 가 있긴 하지만 TTY 가 없어 비밀번호 입력이 불가능한 상황.
+    return 1
+}
+
+require_root_or_sudo() {
+    # apt 가 실제로 필요한 경로에서만 호출. 패키지가 이미 다 깔려 있다면
+    # 이 함수를 부르지 않고 그냥 진행한다 — sudo 권한 없는 계정에서도 동작 가능.
+    if [[ $EUID -eq 0 ]]; then
+        return 0
+    fi
+    if [[ ${#SUDO_CMD[@]} -gt 0 ]]; then
+        return 0
+    fi
+
+    err "시스템 패키지(git / python3 / tmux / nano 등) 설치에 root 권한이 필요한데,"
+    err "현재 사용자에게 sudo 권한이 없거나 비밀번호를 받을 수 있는 TTY 가 없습니다."
+    err "현재 사용자: $(whoami)"
+    err ""
+    err "다음 중 한 가지 방법으로 다시 시도해 주세요:"
+    err ""
+    err "  방법 1) root 계정으로 직접 실행"
+    err "    sudo su -"
+    err "    curl -fsSL https://raw.githubusercontent.com/long-while/mastodon-coc/main/install.sh -o install.sh"
+    err "    bash install.sh"
+    err ""
+    err "  방법 2) sudo 권한이 있는 사용자로 실행 (curl | bash 미사용)"
+    err "    curl -fsSL https://raw.githubusercontent.com/long-while/mastodon-coc/main/install.sh -o install.sh"
+    err "    sudo bash install.sh"
+    err ""
+    err "  방법 3) 먼저 root 로 필수 패키지만 깔아 둔 뒤 일반 사용자로 다시 실행"
+    err "    (root 에서) apt-get install -y git python3 python3-venv python3-pip tmux nano ca-certificates"
+    err "    (일반 사용자로 돌아와서) bash install.sh   # apt 단계가 자동으로 건너뜁니다"
+    exit 1
+}
+
+# ----------------------------------------------------------------------
 # 1. 사전 검증
 # ----------------------------------------------------------------------
 require_apt() {
@@ -125,10 +208,14 @@ install_system_deps() {
         return 0
     fi
 
-    info "시스템 패키지 설치 (sudo 권한 필요, 비대화형 모드)"
-    # sudo -E : 위에서 export 한 DEBIAN_FRONTEND/NEEDRESTART_* 를 sudo 환경에 전달.
-    sudo -E apt-get update -y
-    sudo -E apt-get install "${APT_OPTS[@]}" \
+    # 여기 도달했다는 건 apt 가 정말 필요한 상황. 권한 강제.
+    require_root_or_sudo
+
+    info "시스템 패키지 설치 (비대화형 모드)"
+    # SUDO_CMD : root 면 비어 있어 그대로 apt-get, 일반 사용자면 (sudo -E) 가 앞에 붙는다.
+    # -E 옵션은 위에서 export 한 DEBIAN_FRONTEND/NEEDRESTART_* 를 sudo 환경에 전달.
+    "${SUDO_CMD[@]}" apt-get update -y
+    "${SUDO_CMD[@]}" apt-get install "${APT_OPTS[@]}" \
         git \
         python3 \
         python3-venv \
@@ -358,6 +445,9 @@ MSG
 # ----------------------------------------------------------------------
 main() {
     require_apt
+    # 권한 감지는 항상 먼저. 실패해도(sudo 없음) 즉시 종료하지 않고,
+    # install_system_deps 에서 패키지가 이미 있는지 본 뒤 필요할 때만 강제 종료.
+    setup_privilege || true
     install_system_deps
     require_python
     clone_repo
