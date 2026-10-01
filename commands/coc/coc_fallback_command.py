@@ -8,10 +8,12 @@ CoC 폴백 명령어 — 시트 기반 키워드(능력치/기능/무기) + 스�
    → 스탯 변동.
 2. `[<무기명>]` / `[<무기명>+n]` / `[<무기명>-n]`
    → 무기 판정 + 피해 계산.
+   `[<무기명>/반격]` → 반격: 극단적 성공·대성공이어도 최대 피해 없이 평소대로 굴림.
 3. `[<기능명>]` / `[<기능명>+n]` / `[<기능명>-n]`
-   → 기능/능력치 판정.
+   → 기능/능력치 판정 (+n 보너스 / -n 패널티 주사위).
 
 인식 순서: 스탯 변동 → 무기 → 기능 → 에러.
+이름에 '/' 가 든 기능(`사격(라/산)`)은 라우터가 '/' 로 쪼개 보내므로 다시 합쳐 하나의 이름으로 본다.
 """
 
 from __future__ import annotations
@@ -34,8 +36,8 @@ from utils.logging_config import logger
 from utils.sheets_operations import SheetsManager
 
 from .character import CoCCharacter
-from .check_engine import perform_check
-from .damage_engine import apply_damage_bonus, compute_weapon_base_damage, roll_damage
+from .check_engine import CheckOutcome, CheckResult, perform_check
+from .damage_engine import DamageRoll, WeaponDamage, resolve_weapon_damage, roll_damage
 from .formatter import format_check, format_stat_change, format_weapon_attack
 from .sheet_reader import get_cell_address, load_character_from_worksheet
 
@@ -44,13 +46,64 @@ from .sheet_reader import get_cell_address, load_character_from_worksheet
 # 세 키워드(변화·변동·변경) 는 의미상 동의어로 처리한다.
 _STAT_CHANGE_RE = re.compile(r'^(최대\s+)?(.+?)\s*(변화|변동|변경)$')
 
+COUNTER_KEYWORD = "반격"
+"""`[무기명/반격]` — 반격으로 판정 (극단적 성공·대성공이어도 최대 피해 없음)."""
+
+_DB_MODES_WITH_BONUS = ("db", "1/2 db")
+
+
+def _perform_check(skill_name: str, skill_value: int, modifier: int) -> CheckOutcome:
+    """판정. 보너스/패널티 주사위 상한 초과는 엔진이 알려 주는 문구로 안내한다."""
+    try:
+        return perform_check(skill_name=skill_name, skill_value=skill_value, modifier=modifier)
+    except ValueError as e:
+        raise CommandError(str(e)) from e
+
+
+def _weapon_check(character: CoCCharacter, weapon, modifier: int) -> Tuple[int, CheckOutcome]:
+    """무기가 지정한 기능치로 판정. (기능치, 판정 결과)."""
+    skill_value = character.get_skill_value(weapon.skill_name)
+    if skill_value is None:
+        raise CommandError(
+            f"무기 '{weapon.name}'에 연결된 기능 '{weapon.skill_name}'을(를) "
+            f"시트에서 찾을 수 없습니다. "
+            f"시트의 무기 칸에 적힌 기능 이름이 올바른지 확인해 주세요."
+        )
+    return skill_value, _perform_check(weapon.skill_name, skill_value, modifier)
+
+
+def _roll_sheet_formula(formula: str, what: str) -> DamageRoll:
+    """시트 다이스식 굴림. 문법 오류면 어느 칸을 고칠지 알려 주는 CommandError."""
+    try:
+        return roll_damage(formula or "0")
+    except ValueError as e:
+        raise CommandError(f"{what} '{formula}'을(를) 해석할 수 없습니다. ({e})") from e
+
+
+def _weapon_damage(
+    character: CoCCharacter, weapon, result: CheckResult, counter: bool,
+) -> Optional[WeaponDamage]:
+    """성공 시 피해 (출력 블록 포함). 실패·대실패는 None.
+
+    피해보너스(E8)는 무기 G열이 `db`/`1/2 db` 일 때만 굴린다.
+    """
+    if not result.is_success:
+        return None
+    damage_roll = _roll_sheet_formula(weapon.damage_formula, f"무기 '{weapon.name}'의 피해식")
+    db_roll = None
+    if (weapon.db_mode or "").strip() in _DB_MODES_WITH_BONUS:
+        db_roll = _roll_sheet_formula(character.damage_bonus_formula, "시트의 피해보너스")
+    return resolve_weapon_damage(
+        damage_roll, db_roll, weapon.db_mode, result, penetrates=weapon.penetrates, counter=counter,
+    )
+
 
 @register_command(
     name="__coc_fallback__",
     aliases=[],
     description="CoC 폴백 (시트 기반 기능/무기 판정 + 스탯 변동)",
     category="CoC",
-    examples=["[근력]", "[회피+1]", "[권총]", "[이성 변화/-3]", "[체력 변동/+1d6]"],
+    examples=["[근력]", "[회피+1]", "[권총]", "[권총/반격]", "[이성 변화/-3]", "[체력 변동/+1d6]"],
     requires_sheets=True,
     requires_api=False,
     priority=0,
@@ -85,13 +138,13 @@ class CoCFallbackCommand(BaseCommand):
             stat_name = stat_match.group(2).strip()
             return self._handle_stat_change(context, stat_name, is_max, rest[0])
 
-        # 2/3. 기능/무기 판정 — 키워드에서 +n/-n 분리
-        skill_or_weapon, modifier = split_skill_modifier(first)
-        if not skill_or_weapon:
+        counter = bool(rest) and rest[-1].strip() == COUNTER_KEYWORD
+        target = "/".join([first, *rest[:-1]] if counter else [first, *rest])
+        if not split_skill_modifier(target)[0]:
             raise CommandError(
                 "능력치나 기능 이름을 먼저 입력해 주세요. 예: [회피+1], [근력]"
             )
-        return self._handle_check(context, skill_or_weapon, modifier)
+        return self._handle_check(context, target, counter)
 
     # ------------------------------------------------------------------
     # 판정 (기능 or 무기)
@@ -100,15 +153,21 @@ class CoCFallbackCommand(BaseCommand):
     def _handle_check(
         self,
         context: CommandContext,
-        name: str,
-        modifier: int,
+        full: str,
+        counter: bool = False,
     ) -> CommandResponse:
         character = self._load_character(context.user_id)
+
+        weapon = character.get_weapon(full)
+        if weapon is not None:
+            return self._handle_weapon_attack(character, weapon, 0, counter)
+
+        name, modifier = split_skill_modifier(full)
 
         # 무기 우선 (동명이 있을 경우 무기가 우선)
         weapon = character.get_weapon(name)
         if weapon is not None:
-            return self._handle_weapon_attack(character, weapon, modifier)
+            return self._handle_weapon_attack(character, weapon, modifier, counter)
 
         # 일반 기능/능력치
         skill_value = character.get_skill_value(name)
@@ -117,8 +176,10 @@ class CoCFallbackCommand(BaseCommand):
                 f"'{name}'을(를) 시트에서 찾을 수 없습니다. "
                 f"능력치나 기능 이름을 다시 확인해 주세요."
             )
+        if counter:
+            raise CommandError(f"{COUNTER_KEYWORD}은 무기 판정에만 쓸 수 있습니다.")
 
-        outcome = perform_check(skill_name=name, skill_value=skill_value, modifier=modifier)
+        outcome = _perform_check(name, skill_value, modifier)
         logger.info(
             f"[CoC 판정] @{context.user_id} [{name}] modifier={modifier} "
             f"d100={outcome.rolled.d100}/{skill_value} → {outcome.result.label}"
@@ -139,50 +200,17 @@ class CoCFallbackCommand(BaseCommand):
         character: CoCCharacter,
         weapon,
         modifier: int,
+        counter: bool = False,
     ) -> CommandResponse:
-        # 무기가 지정한 기능치 값
-        skill_value = character.get_skill_value(weapon.skill_name)
-        if skill_value is None:
-            raise CommandError(
-                f"무기 '{weapon.name}'에 연결된 기능 '{weapon.skill_name}'을(를) "
-                f"시트에서 찾을 수 없습니다. "
-                f"시트의 무기 칸에 적힌 기능 이름이 올바른지 확인해 주세요."
-            )
-
-        outcome = perform_check(
-            skill_name=weapon.skill_name,
-            skill_value=skill_value,
-            modifier=modifier,
-        )
-
-        damage_roll = roll_damage(weapon.damage_formula or "0")
-        base_damage, base_detail = compute_weapon_base_damage(
-            damage_roll, outcome.result, penetrates=weapon.penetrates,
-        )
-        bonus_damage, bonus_detail = apply_damage_bonus(
-            db_mode=weapon.db_mode,
-            db_formula=character.damage_bonus_formula,
-            result=outcome.result,
-        )
-        total = base_damage + bonus_damage if outcome.result.is_success else 0
-
+        skill_value, outcome = _weapon_check(character, weapon, modifier)
+        damage = _weapon_damage(character, weapon, outcome.result, counter)
+        total = damage.total if damage else 0
         logger.info(
-            f"[CoC 무기] @{character.user_id} [{weapon.name}] "
-            f"→ {outcome.result.label} 피해={total} (기본 {base_damage} + db {bonus_damage})"
+            f"[CoC 무기] @{character.user_id} [{weapon.name}{'/반격' if counter else ''}] "
+            f"→ {outcome.result.label} 피해={total}"
+            + (f" (기본 {damage.base} + db {damage.bonus})" if damage else "")
         )
-
-        message = format_weapon_attack(
-            weapon_name=weapon.name,
-            skill_name=weapon.skill_name,
-            outcome=outcome,
-            damage_roll=damage_roll,
-            base_damage=base_damage,
-            base_detail=base_detail,
-            bonus_damage=bonus_damage,
-            bonus_detail=bonus_detail,
-            total_damage=total,
-            penetrates=weapon.penetrates,
-        )
+        message = format_weapon_attack(weapon.name, outcome, damage)
         return CommandResponse.create_success(
             message,
             data={
@@ -192,9 +220,10 @@ class CoCFallbackCommand(BaseCommand):
                 "d100": outcome.rolled.d100,
                 "result": outcome.result.value,
                 "penetrates": weapon.penetrates,
+                "counter": counter,
                 "damage_total": total,
-                "damage_base": base_damage,
-                "damage_bonus": bonus_damage,
+                "damage_base": damage.base if damage else 0,
+                "damage_bonus": damage.bonus if damage else 0,
                 "modifier": modifier,
             },
         )

@@ -1,15 +1,13 @@
 """
 CoC 무기 피해 계산
 
-- `parse_damage_formula(formula)` — 복합 다이스식 파싱. 예: `"1d4"`, `"1d4+2"`, `"3d10+1d5"`.
-- `roll_damage(formula, rng=None)` — 복합식 굴려 (total, max, detail) 반환.
-- `compute_weapon_damage(base, result, penetrates, db_rolled, db_max)` — 등급/관통별 최종 피해.
-- `apply_damage_bonus(db_mode, db_formula, result, rng)` — E8 피해보너스 적용.
+- `roll_damage(formula, rng=None)` — 복합식(`"1d4"`, `"1d4+2"`, `"3d10+1d5"`)을 굴려
+  합계·최대값·출력용 식/굴림을 담은 `DamageRoll` 반환.
+- `resolve_weapon_damage(weapon_roll, db_roll, db_mode, result, penetrates, counter)`
+  — 판정 등급·관통·피해보너스·반격 규칙을 적용한 최종 피해와 출력 블록. 피해 규칙의 유일한 구현.
 
 복합식 문법:
-- 토큰: `ndm` | `ndm+k` | `ndm-k` | 정수
-- 토큰 사이를 `+` 또는 `-` 로 잇는다. 예: `3d10+1d5-2`
-- 부호는 토큰 앞에 붙는다. 토큰 내부의 `±k` 는 토큰 자체의 보정값.
+- 항: `ndm` | 정수. 항 사이를 `+` 또는 `-` 로 잇는다. 예: `3d10+1d5-2`, `-1d4`
 """
 
 from __future__ import annotations
@@ -21,8 +19,7 @@ from typing import List, Optional, Tuple
 
 from .check_engine import CheckResult
 
-# 단일 토큰: ndm, ndm+k, ndm-k, 정수
-_TOKEN_DICE = re.compile(r'^(\d+)[dD](\d+)(?:([+-])(\d+))?$')
+_TOKEN_DICE = re.compile(r'^(\d+)[dD](\d+)$')
 _TOKEN_INT = re.compile(r'^(\d+)$')
 
 # 허용 범위
@@ -39,30 +36,24 @@ class DamageRoll:
     formula: str        # 원본 문자열
     total: int          # 실제 굴림 합
     max_value: int      # 이론상 최대값
-    detail: str         # "1d4(3) + 2 = 5" 형태의 설명
+    detail: str         # "1d4(3)=3+2" 형태의 설명
+    expression: str = ""
+    shown: str = ""
+    has_dice: bool = False
 
 
 def _split_terms(formula: str) -> List[Tuple[int, str]]:
     """
-    복합식을 부호 있는 토큰 리스트로 분해.
+    복합식을 부호 있는 항 리스트로 분해.
 
-    `"3d10+1d5-2"` → `[(+1, '3d10'), (+1, '1d5'), (-1, '2')]`
-
-    `"-1d6"` → `[(-1, '1d6')]`
+    `"3d10+1d5-2"` → `[(+1, '3d10'), (+1, '1d5'), (-1, '2')]`, `"-1d6"` → `[(-1, '1d6')]`
     """
     s = (formula or "").strip().replace(" ", "")
     if not s:
         raise ValueError("빈 피해식")
-
-    # 선행 부호 처리
+    sign = -1 if s[0] == '-' else 1
     if s[0] in ('+', '-'):
-        if s[0] == '-':
-            sign = -1
-        else:
-            sign = 1
         s = s[1:]
-    else:
-        sign = 1
 
     tokens: List[Tuple[int, str]] = []
     current = ""
@@ -75,176 +66,190 @@ def _split_terms(formula: str) -> List[Tuple[int, str]]:
             current = ""
         else:
             current += ch
-    if current:
-        tokens.append((sign, current))
-    if not tokens:
+    if not current:
         raise ValueError(f"피해식 문법 오류: '{formula}'")
+    tokens.append((sign, current))
     return tokens
 
 
-def _eval_token(
-    token: str,
-    rng: random.Random,
-) -> Tuple[int, int, str]:
-    """
-    단일 토큰 평가. 반환: (rolled_value, max_value, detail).
-    """
+@dataclass(frozen=True)
+class _TokenRoll:
+    """항 하나 굴림: 값·최소/최대값·설명·출력용 식·출력용 굴림."""
+
+    total: int
+    min_value: int
+    max_value: int
+    detail: str
+    expression: str
+    shown: str
+    has_dice: bool
+
+
+def _roll_dice_token(n: int, m: int, rng: random.Random) -> _TokenRoll:
+    """`ndm` 항 굴림."""
+    if not (MIN_DICE_COUNT <= n <= MAX_DICE_COUNT):
+        raise ValueError(f"다이스 개수 범위 초과: {n} (허용 {MIN_DICE_COUNT}~{MAX_DICE_COUNT})")
+    if not (MIN_DICE_SIDES <= m <= MAX_DICE_SIDES):
+        raise ValueError(f"다이스 면수 범위 초과: {m} (허용 {MIN_DICE_SIDES}~{MAX_DICE_SIDES})")
+    rolls = [rng.randint(1, m) for _ in range(n)]
+    total = sum(rolls)
+    return _TokenRoll(
+        total=total,
+        min_value=n,
+        max_value=n * m,
+        detail=f"{n}d{m}({'+'.join(str(x) for x in rolls)})={total}",
+        expression=f"{n}D{m}",
+        shown=f"{total}[{','.join(str(x) for x in rolls)}]",
+        has_dice=True,
+    )
+
+
+def _roll_token(token: str, rng: random.Random) -> _TokenRoll:
+    """단일 항(`ndm` / 정수) 굴림."""
     dice_m = _TOKEN_DICE.match(token)
     if dice_m:
-        n = int(dice_m.group(1))
-        m = int(dice_m.group(2))
-        op = dice_m.group(3)
-        k = int(dice_m.group(4)) if dice_m.group(4) else 0
-
-        if not (MIN_DICE_COUNT <= n <= MAX_DICE_COUNT):
-            raise ValueError(f"다이스 개수 범위 초과: {n} (허용 {MIN_DICE_COUNT}~{MAX_DICE_COUNT})")
-        if not (MIN_DICE_SIDES <= m <= MAX_DICE_SIDES):
-            raise ValueError(f"다이스 면수 범위 초과: {m} (허용 {MIN_DICE_SIDES}~{MAX_DICE_SIDES})")
-
-        rolls = [rng.randint(1, m) for _ in range(n)]
-        base_total = sum(rolls)
-        base_max = n * m
-
-        if op == '+':
-            total = base_total + k
-            max_v = base_max + k
-        elif op == '-':
-            total = base_total - k
-            max_v = base_max - k
-        else:
-            total = base_total
-            max_v = base_max
-
-        roll_str = "+".join(str(x) for x in rolls) if len(rolls) > 1 else str(rolls[0])
-        if op:
-            detail = f"{n}d{m}({roll_str}){op}{k}={total}"
-        else:
-            detail = f"{n}d{m}({roll_str})={total}"
-        return total, max_v, detail
-
-    int_m = _TOKEN_INT.match(token)
-    if int_m:
-        v = int(int_m.group(1))
-        return v, v, str(v)
-
-    raise ValueError(f"피해식 토큰 해석 불가: '{token}'")
+        return _roll_dice_token(int(dice_m.group(1)), int(dice_m.group(2)), rng)
+    if _TOKEN_INT.match(token):
+        v = int(token)
+        return _TokenRoll(v, v, v, str(v), str(v), str(v), False)
+    raise ValueError(f"피해식 항 해석 불가: '{token}'")
 
 
-def roll_damage(
-    formula: str,
-    rng: Optional[random.Random] = None,
-) -> DamageRoll:
+def roll_damage(formula: str, rng: Optional[random.Random] = None) -> DamageRoll:
     """
     복합 다이스식 굴림.
 
     Args:
         formula: `"1d4"`, `"1d4+2"`, `"3d10+1d5"`, `"0"` 등
-        rng: 테스트용
+        rng: 테스트용 시드 가능 RNG
 
-    Returns:
-        DamageRoll
+    Raises:
+        ValueError: 문법 오류·다이스 범위 초과.
     """
-    r = rng or random
     cleaned = (formula or "").strip()
     if not cleaned:
-        return DamageRoll(formula="", total=0, max_value=0, detail="0")
-
-    # "0" 같은 단순 정수 fast path
+        return DamageRoll(formula="", total=0, max_value=0, detail="0", expression="0", shown="0")
     if _TOKEN_INT.match(cleaned):
         v = int(cleaned)
-        return DamageRoll(formula=cleaned, total=v, max_value=v, detail=str(v))
+        return DamageRoll(formula=cleaned, total=v, max_value=v, detail=str(v), expression=str(v), shown=str(v))
+    return _roll_terms(cleaned, rng or random)
 
-    terms = _split_terms(cleaned)
+
+def _roll_terms(cleaned: str, rng: random.Random) -> DamageRoll:
+    """`+`/`-` 로 이은 항들을 굴려 합친다. 음수 항의 최대 기여는 -(최소값)."""
     total = 0
     max_total = 0
     pieces: List[str] = []
-    for sign, token in terms:
-        val, mx, det = _eval_token(token, r)
-        total += sign * val
-        max_total += sign * mx
+    expression = ""
+    shown = ""
+    has_dice = False
+    for sign, token in _split_terms(cleaned):
+        rolled = _roll_token(token, rng)
+        total += sign * rolled.total
+        max_total += rolled.max_value if sign > 0 else -rolled.min_value
         prefix = "-" if sign < 0 else ("" if not pieces else "+")
-        pieces.append(prefix + det)
+        pieces.append(prefix + rolled.detail)
+        expression += prefix + rolled.expression
+        shown += prefix + rolled.shown
+        has_dice = has_dice or rolled.has_dice
 
-    detail = " ".join(pieces).strip().lstrip("+")
-    return DamageRoll(formula=cleaned, total=total, max_value=max_total, detail=detail)
+    return DamageRoll(
+        formula=cleaned,
+        total=total,
+        max_value=max_total,
+        detail=" ".join(pieces).strip().lstrip("+"),
+        expression=expression,
+        shown=shown,
+        has_dice=has_dice,
+    )
 
 
 # ======================================================================
-# 판정 등급 × 관통 여부 → 최종 피해
+# 출력용 피해 블록
 # ======================================================================
 
-def compute_weapon_base_damage(
-    damage: DamageRoll,
+@dataclass(frozen=True)
+class WeaponDamage:
+    """무기 판정 성공 시 피해.
+
+    `expression`/`shown` 이 비어 있으면 다이스 블록 없이 `➤ 피해 N` 만 출력한다
+    (비관통 극단적 성공·대성공처럼 최대 피해로 고정되거나 주사위가 없는 경우).
+    """
+
+    total: int
+    base: int
+    bonus: int
+    expression: str = ""
+    shown: str = ""
+
+
+@dataclass(frozen=True)
+class _BonusPart:
+    value: int
+    expression: str = ""
+    shown: str = ""
+    has_dice: bool = False
+
+
+def _join_term(text: str) -> str:
+    """뒤에 이어 붙일 항: 음수는 그대로(`-1`), 나머지는 `+` 접두."""
+    return text if text.startswith("-") else f"+{text}"
+
+
+def _concat(weapon_text: str, bonus_text: str) -> str:
+    """무기 항 + 피해보너스 항. 무기 피해식이 비어(`0`) 있으면 피해보너스만 (`0+2D6` → `2D6`)."""
+    if weapon_text == "0" and bonus_text:
+        return bonus_text.removeprefix("+")
+    return weapon_text + bonus_text
+
+
+def _bonus_part(db_roll: Optional[DamageRoll], db_mode: str, use_max: bool) -> _BonusPart:
+    """피해보너스 항. `use_max` 면 최대값 (극단적 성공·대성공)."""
+    mode = (db_mode or "0").strip()
+    if db_roll is None or mode not in ("db", "1/2 db") or db_roll.expression in ("", "0"):
+        return _BonusPart(0)
+    full = db_roll.max_value if use_max else db_roll.total
+    if mode == "db":
+        return _BonusPart(full, _join_term(db_roll.expression), _join_term(db_roll.shown), db_roll.has_dice)
+    return _BonusPart(
+        full // 2,
+        f"+1/2({db_roll.expression})",
+        f"+1/2({db_roll.shown})",
+        db_roll.has_dice,
+    )
+
+
+def resolve_weapon_damage(
+    weapon_roll: DamageRoll,
+    db_roll: Optional[DamageRoll],
+    db_mode: str,
     result: CheckResult,
     penetrates: bool,
-) -> Tuple[int, str]:
-    """
-    무기 기본 피해(무기란 F열) 계산. db 추가피해는 별도.
+    counter: bool = False,
+) -> Optional[WeaponDamage]:
+    """판정 등급별 피해 + 출력 블록. 실패·대실패는 None.
 
-    - 대성공 / 극단:
-        * 관통: `rolled + max`  → "관통, r + max_r"
-        * 비관통: `max` 만       → "비관통, max_r 만"
-    - 어려운 / 성공: `rolled`
-    - 실패 / 대실패: 0
-
-    Returns:
-        (피해값, 설명 문자열)
+    - 보통/어려운 성공, 또는 반격(`counter`): 무기식 + 피해보너스를 그대로 굴림 → `1D3+2D6`
+    - 극단적 성공·대성공 + 관통: (무기 최대 + 피해보너스 최대) 상수 + 무기식 굴림 → `20+1D8`
+    - 극단적 성공·대성공 + 비관통: 무기 최대 + 피해보너스 최대, 다이스 블록 없음
+    합계가 음수(음수 피해보너스)면 0.
     """
     if not result.is_success:
-        return 0, "실패로 피해 없음"
-
-    if result.is_max_damage:
-        if penetrates:
-            total = damage.total + damage.max_value
-            return total, f"관통, 굴림 + 최대값: {damage.total} + {damage.max_value} = {total}"
-        else:
-            return damage.max_value, f"비관통, 최대값: {damage.max_value}"
-
-    # 어려운 / 성공
-    return damage.total, f"굴림: {damage.total}"
-
-
-def apply_damage_bonus(
-    db_mode: str,
-    db_formula: str,
-    result: CheckResult,
-    rng: Optional[random.Random] = None,
-) -> Tuple[int, str]:
-    """
-    추가 피해(db) 처리.
-
-    Args:
-        db_mode: '0' / '1/2 db' / 'db' 중 하나. 그 외/빈값 → 0 취급
-        db_formula: E8 의 피해보너스 원문 (예: '1d4', '2d6', '0', '-1', '-2')
-        result: 이번 판정 결과 등급 (대성공/극단이면 다이스일 때 최대값 적용)
-        rng: 테스트용
-
-    Returns:
-        (추가 피해값, 설명)
-    """
-    mode = (db_mode or "0").strip()
-    formula = (db_formula or "0").strip()
-
-    if mode not in ("1/2 db", "db"):
-        return 0, "db 없음"
-
-    # 피해보너스 문자열 → DamageRoll
-    try:
-        bonus_roll = roll_damage(formula, rng=rng)
-    except ValueError:
-        return 0, f"db 파싱 실패: '{formula}'"
-
-    # 대성공/극단 이면 다이스식은 최대값 적용. 고정 정수도 동일하게 max_value 를 사용.
-    if result.is_max_damage:
-        base = bonus_roll.max_value
-        base_detail = f"db={formula} 최대값={base}"
+        return None
+    max_damage = result.is_max_damage and not counter
+    bonus = _bonus_part(db_roll, db_mode, use_max=max_damage)
+    if not max_damage:
+        base = weapon_roll.total
+        show = weapon_roll.has_dice or bonus.has_dice
+        expression = _concat(weapon_roll.expression, bonus.expression) if show else ""
+        shown = _concat(weapon_roll.shown, bonus.shown) if show else ""
+    elif penetrates:
+        base = weapon_roll.total + weapon_roll.max_value
+        const = weapon_roll.max_value + bonus.value
+        show = weapon_roll.has_dice
+        expression = f"{const}{_join_term(weapon_roll.expression)}" if show else ""
+        shown = f"{const}{_join_term(weapon_roll.shown)}" if show else ""
     else:
-        base = bonus_roll.total
-        base_detail = f"db={formula} 굴림={base}"
-
-    if mode == "db":
-        return base, base_detail
-
-    # 1/2 db
-    half = base // 2
-    return half, f"1/2 × ({base_detail}) = {half}"
+        base, expression, shown = weapon_roll.max_value, "", ""
+    total = max(0, base + bonus.value)
+    return WeaponDamage(total=total, base=base, bonus=bonus.value, expression=expression, shown=shown)

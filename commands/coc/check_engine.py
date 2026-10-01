@@ -2,10 +2,10 @@
 CoC 7판 판정 엔진
 
 - `roll_d100(rng=None) -> int`: 1~100 정수
-- `roll_with_modifier(n, mode, rng=None) -> RolledD100`
-  보너스/패널티 다이스 적용 (10의 자리 주사위 n+1 개 굴려 최저/최고 선택).
+- `roll_with_modifier(n, rng=None) -> RolledD100`
+  보너스/패널티 다이스 적용 (10의 자리 주사위 n+1 개 굴려 완성값 중 최저/최고 선택).
 - `determine_result(d100, skill) -> CheckResult`
-  명세대로 6등급 판정 (50 미만/이상에 따라 대성공/대실패 임계 달라짐).
+  6등급 판정 (대성공은 1 만, 대실패 임계는 기능값 50 미만/이상에 따라 다름).
 
 `CheckResult` 는 enum — 포매터가 한국어 라벨을 붙인다.
 """
@@ -24,7 +24,7 @@ class CheckResult(Enum):
     CRITICAL = "critical"           # 대성공
     EXTREME = "extreme"              # 극단적 성공
     HARD = "hard"                    # 어려운 성공
-    REGULAR = "regular"              # 성공
+    REGULAR = "regular"              # 보통 성공
     FAILURE = "failure"              # 실패
     FUMBLE = "fumble"                # 대실패
 
@@ -34,14 +34,14 @@ class CheckResult(Enum):
             CheckResult.CRITICAL: "대성공",
             CheckResult.EXTREME: "극단적 성공",
             CheckResult.HARD: "어려운 성공",
-            CheckResult.REGULAR: "성공",
+            CheckResult.REGULAR: "보통 성공",
             CheckResult.FAILURE: "실패",
             CheckResult.FUMBLE: "대실패",
         }[self]
 
     @property
     def is_success(self) -> bool:
-        """성공 등급(대성공/극단/어려운/성공) 인지."""
+        """성공 등급(대성공/극단/어려운/보통) 인지."""
         return self in (
             CheckResult.CRITICAL,
             CheckResult.EXTREME,
@@ -61,8 +61,7 @@ class CheckResult(Enum):
 
 def roll_d100(rng: Optional[random.Random] = None) -> int:
     """1~100. rng 인자로 시드 가능."""
-    r = rng or random
-    return r.randint(1, 100)
+    return (rng or random).randint(1, 100)
 
 
 @dataclass(frozen=True)
@@ -70,10 +69,20 @@ class RolledD100:
     """판정에 실제로 사용된 d100 결과 + 디버그 정보."""
 
     d100: int                           # 최종 1~100 값
-    ones: int                           # 1의 자리 (1~10; raw 0 은 10 으로 해석)
+    ones: int                           # 1의 자리 눈 (0~9)
     tens: int                           # 채택된 10의 자리 (0, 10, 20, …, 90)
     tens_candidates: Tuple[int, ...]    # 굴린 모든 10의 자리 후보 (보너스/패널티 시 n+1 개)
     modifier: int                       # 보너스(+n) / 패널티(-n) 개수. 0=일반 판정.
+    candidates: Tuple[int, ...] = ()
+
+
+MAX_MODIFIER_DICE = 10
+"""보너스/패널티 주사위 개수 상한 (룰상 2개, 여유를 둔 값). 거대 입력으로 인한 과부하 방지."""
+
+
+def _combine(tens: int, ones: int) -> int:
+    """10의 자리(0~90) + 1의 자리(0~9). `00` + `0` = 100."""
+    return tens + ones or 100
 
 
 def roll_with_modifier(
@@ -81,51 +90,38 @@ def roll_with_modifier(
     rng: Optional[random.Random] = None,
 ) -> RolledD100:
     """
-    보너스/패널티 다이스를 적용한 d100 판정.
+    보너스/패널티 다이스를 적용한 d100 판정 (CoC 7판 규칙).
 
-    동작:
-    - 1의 자리 주사위(d10, 0~9) 1개를 굴린다. 0 은 수치 10으로 해석.
-    - 10의 자리 주사위(d10, 0~9) `|modifier| + 1` 개를 굴린다. 값은 0~90 (0=0, 1=10, ...).
-    - modifier > 0 (보너스): 10의 자리 후보 중 **가장 낮은** 값을 채택.
-    - modifier < 0 (패널티): 10의 자리 후보 중 **가장 높은** 값을 채택.
-    - modifier == 0: 10의 자리 1개만 굴려 그대로 사용.
-    - 최종 d100 = tens + ones. 단 tens_raw=0 and ones_raw=0 이면 100 (관습).
+    - 1의 자리 d10(0~9) 1개, 10의 자리 d10(00~90) `|modifier| + 1` 개.
+    - 각 10의 자리 후보를 1의 자리와 합쳐 완성값을 만든다. `00` + `0` = 100.
+    - 보너스: 완성값 중 가장 낮은 값 / 패널티: 가장 높은 값 / 일반: 유일한 값.
 
     Args:
         modifier: 양수=보너스, 음수=패널티, 0=일반 판정
         rng: 테스트용 시드 가능 RNG
 
-    Returns:
-        RolledD100
+    Raises:
+        ValueError: 보너스/패널티 주사위가 `MAX_MODIFIER_DICE` 개를 넘을 때.
     """
+    if abs(modifier) > MAX_MODIFIER_DICE:
+        raise ValueError(f"보너스/패널티 주사위는 최대 {MAX_MODIFIER_DICE}개까지입니다. (입력: {modifier:+d})")
     r = rng or random
-
-    ones_raw = r.randint(0, 9)
-    ones = 10 if ones_raw == 0 else ones_raw
-
-    n = abs(modifier) + 1
-    tens_raw = tuple(r.randint(0, 9) for _ in range(n))
-    tens_candidates = tuple(t * 10 for t in tens_raw)
-
+    ones = r.randint(0, 9)
+    tens_candidates = tuple(r.randint(0, 9) * 10 for _ in range(abs(modifier) + 1))
+    candidates = tuple(_combine(t, ones) for t in tens_candidates)
     if modifier > 0:
-        chosen_tens = min(tens_candidates)
+        d100 = min(candidates)
     elif modifier < 0:
-        chosen_tens = max(tens_candidates)
+        d100 = max(candidates)
     else:
-        chosen_tens = tens_candidates[0]
-
-    # 관습: tens=0 and ones_raw=0 → 100
-    if chosen_tens == 0 and ones_raw == 0:
-        d100 = 100
-    else:
-        d100 = chosen_tens + ones
-
+        d100 = candidates[0]
     return RolledD100(
         d100=d100,
         ones=ones,
-        tens=chosen_tens,
+        tens=tens_candidates[candidates.index(d100)],
         tens_candidates=tens_candidates,
         modifier=modifier,
+        candidates=candidates,
     )
 
 
@@ -135,35 +131,26 @@ def roll_with_modifier(
 
 def determine_result(d100: int, skill_value: int) -> CheckResult:
     """
-    명세의 6등급 판정 로직.
+    6등급 판정 로직.
 
-    - 기능값 50 미만:
-        * 1 → 대성공
-        * 96~100 → 대실패
-    - 기능값 50 이상:
-        * 1~5 → 대성공
-        * 100 → 대실패
+    - 대성공: 기능값과 무관하게 1 만.
+    - 대실패: 기능값 50 미만이면 96~100, 50 이상이면 100.
 
-    공통:
+    공통 (기준치는 내림):
     - d100 ≤ skill/5 → 극단적 성공
     - d100 ≤ skill/2 → 어려운 성공
-    - d100 ≤ skill   → 성공
+    - d100 ≤ skill   → 보통 성공
     - 나머지 → 실패
 
     단 대성공/대실패 판정이 다른 임계보다 우선한다.
     """
     skill = max(0, int(skill_value))
 
-    if skill >= 50:
-        if 1 <= d100 <= 5:
-            return CheckResult.CRITICAL
-        if d100 == 100:
-            return CheckResult.FUMBLE
-    else:
-        if d100 == 1:
-            return CheckResult.CRITICAL
-        if 96 <= d100 <= 100:
-            return CheckResult.FUMBLE
+    if d100 == 1:
+        return CheckResult.CRITICAL
+    fumble_from = 100 if skill >= 50 else 96
+    if d100 >= fumble_from:
+        return CheckResult.FUMBLE
 
     if d100 <= skill // 5:
         return CheckResult.EXTREME
