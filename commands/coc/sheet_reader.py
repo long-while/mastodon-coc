@@ -8,6 +8,7 @@ CoC 캐릭터 시트 파서
 외부 API:
 - `load_character_from_worksheet(ws, user_id)` — gspread Worksheet 객체 받아 파싱
 - `get_cell_address(name, is_max=False)` — 스탯명 → (row, col) 1-based 좌표 (쓰기용)
+- `changeable_stat_labels()` — `[○○ 변화/±k]` 로 바꿀 수 있는 항목명 (안내 문구용)
 
 테스트용 헬퍼:
 - `parse_character_values(values, user_id, worksheet_name)` — 2D 리스트만 받아 파싱
@@ -16,6 +17,8 @@ CoC 캐릭터 시트 파서
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
+
+from utils.command_text import name_key
 
 from .character import (
     ATTRIBUTES,
@@ -58,6 +61,9 @@ _CELL_ADDRESS: dict[tuple[str, bool], tuple[int, int]] = {
 }
 
 
+_NOT_CHANGEABLE = frozenset({"피해보너스"})
+
+
 # E열의 이동력 (E9) — C11 과 중복될 수 있음. 기본은 C11 을 '이동력' 으로 취급.
 _MOVEMENT_E_CELL: tuple[int, int] = (9, 5)
 
@@ -73,8 +79,20 @@ def get_cell_address(stat_name: str, is_max: bool = False) -> Optional[Tuple[int
     Returns:
         (row, col) 1-based 또는 None
     """
-    key = (stat_name.strip(), bool(is_max))
-    return _CELL_ADDRESS.get(key)
+    wanted = name_key(stat_name)
+    for (name, max_flag), address in _CELL_ADDRESS.items():
+        if max_flag == bool(is_max) and name not in _NOT_CHANGEABLE and name_key(name) == wanted:
+            return address
+    return None
+
+
+def changeable_stat_labels() -> List[str]:
+    """`[○○ 변화/±k]` 로 바꿀 수 있는 항목명 — `최대 X` 포함, 셀 좌표 맵 순서."""
+    return [
+        f"최대 {name}" if max_flag else name
+        for name, max_flag in _CELL_ADDRESS
+        if name not in _NOT_CHANGEABLE
+    ]
 
 
 # ======================================================================

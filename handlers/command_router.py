@@ -11,6 +11,8 @@ import time
 import uuid
 from typing import List, Optional, Dict, Any, Tuple, Protocol, Union
 from abc import ABC, abstractmethod
+from utils.command_text import compact, is_dice_expression, normalize_command_text
+from utils.korean_utils import josa
 from utils.log_sanitizer import sanitize_log_input
 
 # 경로 설정
@@ -286,7 +288,7 @@ class ModernCommandRouter:
             )
             return self._create_error_result(
                 user_id,
-                f"[{first_keyword}]은(는) 사용 가능한 명령어가 아닙니다. "
+                f"[{first_keyword}]{josa(first_keyword, '은', '는')} 사용 가능한 명령어가 아닙니다. "
                 f"[도움말]을 입력해 명령어 목록을 확인해 주세요.",
             )
 
@@ -853,6 +855,8 @@ def parse_command_from_text(text: str) -> List[str]:
     Returns:
         List[str]: 추출된 키워드들 (예: ['다이스', '2d6'] 또는 ['다이스', '2d6'])
     """
+    text = normalize_command_text(text)
+
     # BBCode 스타일 포맷팅 태그 제거 ([color:hex], [/color], [bg:hex], [/bg])
     text = re.sub(r'\[/?(color|bg)(:[0-9a-fA-F]{3,8})?\]', '', text)
 
@@ -864,12 +868,9 @@ def parse_command_from_text(text: str) -> List[str]:
     # 첫 번째 매치만 사용
     keywords_str = matches[0]
     
-    # 다이스 표현식 패턴 확인 (예: "1d6", "2d10+5", "3d6-2", "1d20>15")
-    dice_pattern = re.compile(r'^\d+[dD]\d+([\+\-]\d+)?([<>]\d+)?$')
-
-    # 단순한 다이스 표현식인 경우 (예: [1d6], [1d20+5])
-    if dice_pattern.match(keywords_str.strip()):
-        return ['다이스', keywords_str.strip()]
+    # 단순한 다이스 표현식인 경우 (예: [1d6], [1d20+5], [2d6 + 3], [1d100<=50])
+    if is_dice_expression(keywords_str):
+        return ['다이스', compact(keywords_str)]
 
     # 일반적인 경우: / 기준으로 분할
     keywords = [keyword.strip() for keyword in keywords_str.split('/')]

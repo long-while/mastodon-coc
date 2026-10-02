@@ -18,7 +18,7 @@ from utils.lock_manager import get_lock_manager
 # `'이름' / '이름+1' / '이름-2'` — 마지막 ±정수만 접미어로 분리.
 # 현재 어떤 룰의 이름에도 가운데 +/- 가 들어가지 않으므로 lazy match (`(.*?)`)로
 # 끝부분 부호+숫자만 떼어내는 방식이 충분하다.
-_SKILL_MODIFIER_RE = re.compile(r'^(.*?)([+-]\d+)$')
+_SKILL_MODIFIER_RE = re.compile(r'^(.*?)([+-])\s*(\d+)$')
 
 
 # 사용자 친화 오류 문구 (룰 간 통일)
@@ -38,7 +38,7 @@ def split_skill_modifier(keyword: str) -> Tuple[str, int]:
     """
     `'기쁨'` → ('기쁨', 0)
     `'파괴+1'` → ('파괴', 1)
-    `'회피-2'` → ('회피', -2)
+    `'회피-2'` → ('회피', -2), `'회피 - 2'` → ('회피', -2)
     `'+1'` → ('', 1) — 호출측에서 빈 이름 검증 책임.
 
     Args:
@@ -52,7 +52,7 @@ def split_skill_modifier(keyword: str) -> Tuple[str, int]:
     if not m:
         return name, 0
     base = m.group(1).strip()
-    return base, int(m.group(2))
+    return base, int(m.group(2) + m.group(3))
 
 
 def get_character_worksheet(sheets_manager, user_id: str):

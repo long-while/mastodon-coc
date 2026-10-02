@@ -24,8 +24,8 @@ def has_final_consonant(char: str) -> bool:
     if not ('가' <= char <= '힣'):
         # 숫자나 영문의 경우 발음을 기준으로 판단
         if char.isdigit():
-            # 숫자별 받침 여부: 1,7,8 = 받침 있음, 나머지 = 받침 없음
-            return char in '178'
+            # 숫자 읽기 받침: 영·일·삼·육·칠·팔 = 받침 있음 / 이·사·오·구 = 없음
+            return char in '013678'
         elif char.isalpha():
             # 영문의 경우 발음을 기준으로 (간단한 규칙)
             # L, M, N, R = 받침 있음으로 처리
@@ -141,6 +141,11 @@ def format_korean(template: str, **kwargs) -> str:
 
 
 # 편의 함수들
+def josa(word: str, with_final: str, without_final: str) -> str:
+    """받침 여부에 맞는 조사만 반환. `josa('근력', '을', '를')` → '을'."""
+    return with_final if has_final_consonant(get_last_char(word)) else without_final
+
+
 def add_eun_neun(word: str) -> str:
     """은/는 조사 추가"""
     last_char = get_last_char(word)

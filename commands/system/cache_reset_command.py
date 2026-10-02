@@ -27,6 +27,7 @@ try:
     from utils.cache_manager import bot_cache
     from commands.base_command import BaseCommand, CommandContext, CommandResponse
     from commands.registry import register_command
+    from utils.korean_utils import josa
 except ImportError as e:
     import logging
     logger = logging.getLogger('sheet_update_command')
@@ -99,7 +100,7 @@ class CacheResetCommand(BaseCommand):
             if target is None:
                 provided = context.keywords[1].strip() if len(context.keywords) >= 2 else ''
                 return CommandResponse.create_error(
-                    f"'{provided}'은(는) 사용할 수 없는 옵션입니다.\n"
+                    f"'{provided}'{josa(provided, '은', '는')} 사용할 수 없는 옵션입니다.\n"
                     "사용 가능한 옵션: 도움말, 캐릭터, 랜덤표, 커스텀, 전체"
                 )
 

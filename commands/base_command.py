@@ -208,7 +208,7 @@ class BaseCommand(ABC):
 
             except Exception as e:
                 logger.error(f"레거시 명령어 실행 중 오류: {e}", exc_info=True)
-                return CommandResponse.create_error(f"명령어 실행 중 오류가 발생했습니다: {str(e)}")
+                return CommandResponse.create_error("명령어 실행 중 오류가 발생했습니다.", error=e)
 
         # execute가 오버라이드되지 않고 _execute_command도 없으면 에러
         raise NotImplementedError(

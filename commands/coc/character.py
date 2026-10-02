@@ -8,7 +8,17 @@ CoC 캐릭터 데이터 모델
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Mapping, Optional
+
+from utils.command_text import name_key
+
+
+def _resolve(table: Mapping[str, object], name: str) -> Optional[str]:
+    """`table` 에서 `name` 에 해당하는 실제 키. 정확 매칭 우선, 없으면 `name_key` 로 비교."""
+    if name in table:
+        return name
+    wanted = name_key(name)
+    return next((key for key in table if name_key(key) == wanted), None)
 
 
 # ======================================================================
@@ -192,12 +202,10 @@ class CoCCharacter:
         if not key:
             return None
 
-        if key in self.attributes:
-            return self.attributes[key]
-        if key in self.base_skills:
-            return self.base_skills[key]
-        if key in self.extra_skills:
-            return self.extra_skills[key]
+        for table in (self.attributes, self.base_skills, self.extra_skills):
+            found = _resolve(table, key)
+            if found is not None:
+                return table[found]
 
         # 특수 항목 (판정보다는 스탯 변동에서 주로 쓰임이지만, 참조용)
         SPECIAL = {
@@ -210,17 +218,17 @@ class CoCCharacter:
             "최대 이성": self.san_max,
             "시작 이성": self.san_start,
         }
-        return SPECIAL.get(key)
+        found = _resolve(SPECIAL, key)
+        return SPECIAL[found] if found is not None else None
 
     def get_weapon(self, name: str) -> Optional[Weapon]:
-        """무기명으로 탐색. 이름 공백/대소문자 정규화 없이 정확 매칭."""
+        """무기명으로 탐색. 정확 매칭 우선, 없으면 공백·장식 괄호·대소문자 무시."""
         key = (name or "").strip()
         if not key:
             return None
-        for w in self.weapons:
-            if w.name == key:
-                return w
-        return None
+        by_name = {w.name: w for w in self.weapons}
+        found = _resolve(by_name, key)
+        return by_name[found] if found is not None else None
 
     def has_weapon(self, name: str) -> bool:
         return self.get_weapon(name) is not None
@@ -230,8 +238,20 @@ class CoCCharacter:
         key = (name or "").strip()
         if not key:
             return False
-        return (
-            key in self.attributes
-            or key in self.base_skills
-            or key in self.extra_skills
+        return any(
+            _resolve(table, key) is not None
+            for table in (self.attributes, self.base_skills, self.extra_skills)
         )
+
+    def canonical_skill_name(self, name: str) -> str:
+        """입력한 이름에 해당하는 시트의 실제 이름 (`근 력` → `근력`). 없으면 입력 그대로."""
+        key = (name or "").strip()
+        for table in (self.attributes, self.base_skills, self.extra_skills):
+            found = _resolve(table, key)
+            if found is not None:
+                return found
+        return key
+
+    def known_names(self) -> List[str]:
+        """판정·무기로 쓸 수 있는 이름 전체 (오류 문구의 비슷한 이름 추천용)."""
+        return [*self.attributes, *self.base_skills, *self.extra_skills, *(w.name for w in self.weapons)]

@@ -16,11 +16,23 @@ try:
     from commands.base_command import BaseCommand, CommandContext, CommandResponse
     from commands.registry import register_command
     from models.command_result import DiceResult, create_dice_result
+    from utils.command_text import DICE_EXPRESSION_RE, DICE_USAGE, compact, is_dice_expression
+    from utils.korean_utils import josa
 except ImportError as e:
     import logging
     logger = logging.getLogger('dice_command')
     logger.error(f"필수 모듈 임포트 실패: {e}")
     raise
+
+
+_COMPARE = {
+    "<": lambda total, target: total < target,
+    "<=": lambda total, target: total <= target,
+    ">": lambda total, target: total > target,
+    ">=": lambda total, target: total >= target,
+    "=": lambda total, target: total == target,
+    "<>": lambda total, target: total != target,
+}
 
 
 @register_command(
@@ -41,8 +53,8 @@ class DiceCommand(BaseCommand):
     - [다이스/2d6] : 6면체 주사위 2개
     - [1d20+5] : 20면체 주사위 1개 + 5 보정
     - [2d6-3] : 6면체 주사위 2개 - 3 보정
-    - [다이스/3d6<4] : 6면체 주사위 3개, 4 이하면 성공
-    - [다이스/1d20>15] : 20면체 주사위 1개, 15 이상이면 성공
+    - [1d100<=50] : 100면체 1개, 합계 50 이하면 성공 (< 미만, > 초과, >= 이상, = 같음, <> 다름)
+    - [2d6+1>=7] : 6면체 2개 + 1, 합계 7 이상이면 성공
     - [1d6] : 직접 다이스 표현식 (다이스 키워드 없이)
     """
     
@@ -103,7 +115,7 @@ class DiceCommand(BaseCommand):
             ValueError: 표현식이 없거나 잘못된 경우
         """
         if not keywords:
-            raise ValueError("주사위 식을 입력해 주세요. 예: [2d6], [1d20+5]")
+            raise ValueError(f"주사위 식을 입력해 주세요.\n{DICE_USAGE}")
         
         # 케이스 1: [다이스/2d6] 형태
         if len(keywords) >= 2 and keywords[0].lower() in ['다이스', 'dice']:
@@ -121,284 +133,97 @@ class DiceCommand(BaseCommand):
             logger.info(f"기본 다이스(1d6) 사용 - 사용자에게 안내 메시지 포함")
             return "1d6"  # 기본값으로 6면체 주사위 1개
         
-        raise ValueError(
-            "주사위 형식이 올바르지 않습니다. 예: [2d6], [1d20+5], [3d6<4]"
-        )
+        raise ValueError(f"주사위 형식이 올바르지 않습니다.\n{DICE_USAGE}")
     
     def _is_dice_expression(self, expression: str) -> bool:
-        """
-        문자열이 다이스 표현식인지 확인
+        """문자열이 다이스 식인지 (`NdM`, `NdM±K`, `NdM±K<=A`)."""
+        return is_dice_expression(expression)
 
-        Args:
-            expression: 확인할 문자열
-
-        Returns:
-            bool: 다이스 표현식 여부
-        """
-        # 기본 다이스 패턴: 숫자d숫자[+/-숫자][</>숫자]
-        dice_pattern = re.compile(r'^\d+[dD]\d+([\+\-]\d+)?([<>]\d+)?$')
-        return bool(dice_pattern.match(expression))
-    
     def _parse_dice_expression(self, dice_expression: str) -> Dict[str, Any]:
         """
-        다이스 표현식 파싱
-
-        Args:
-            dice_expression: 다이스 표현식 (예: "2d6", "3d6<4", "1d20+5")
-
-        Returns:
-            Dict: 파싱된 다이스 설정
+        다이스 식 파싱. 비교는 보정값을 더한 **합계** 기준 (`<` 미만, `<=` 이하, `>` 초과, `>=` 이상,
+        `=` 같음, `<>` 다름).
 
         Raises:
-            ValueError: 파싱 실패
+            ValueError: 형식 오류.
         """
         if not dice_expression:
-            raise ValueError("주사위 식을 입력해 주세요. 예: [2d6], [1d20+5]")
-
-        # 성공/실패 조건 파싱
-        threshold = None
-        threshold_type = None
-
-        if '<' in dice_expression:
-            dice_part, threshold_str = dice_expression.split('<')
-            threshold = int(threshold_str)
-            threshold_type = '<'
-        elif '>' in dice_expression:
-            dice_part, threshold_str = dice_expression.split('>')
-            threshold = int(threshold_str)
-            threshold_type = '>'
-        else:
-            dice_part = dice_expression
-
-        # 보정값(modifier) 파싱 (예: 1d20+5, 2d6-3)
-        modifier = 0
-        modifier_match = re.search(r'([\+\-]\d+)', dice_part)
-        if modifier_match:
-            modifier_str = modifier_match.group(1)
-            modifier = int(modifier_str)
-            # 보정값 부분을 제거하여 기본 다이스만 남김
-            dice_part = dice_part.replace(modifier_str, '')
-
-        # 기본 다이스 표현식 파싱 (예: 2d6)
-        match = re.match(r'(\d+)[dD](\d+)', dice_part.lower())
+            raise ValueError(DICE_USAGE)
+        match = DICE_EXPRESSION_RE.match(compact(dice_expression))
         if not match:
-            raise ValueError(
-                f"'{dice_expression}'을(를) 주사위 식으로 인식할 수 없습니다. "
-                f"예: [2d6], [1d20+5], [3d6<4]"
-            )
-
-        try:
-            num_dice = int(match.group(1))
-            dice_sides = int(match.group(2))
-        except ValueError:
-            raise ValueError(
-                f"'{dice_expression}'에 숫자가 아닌 값이 섞여 있어 처리할 수 없습니다."
-            )
-
+            raise ValueError(f"'{dice_expression}'{josa(dice_expression, '은', '는')} 주사위 식이 아닙니다.\n{DICE_USAGE}")
+        num_dice, dice_sides, modifier, threshold_type, threshold = match.groups()
         return {
-            'num_dice': num_dice,
-            'dice_sides': dice_sides,
-            'modifier': modifier,
-            'threshold': threshold,
+            'num_dice': int(num_dice),
+            'dice_sides': int(dice_sides),
+            'modifier': int(modifier) if modifier else 0,
+            'threshold': int(threshold) if threshold is not None else None,
             'threshold_type': threshold_type,
-            'original_expression': dice_expression
+            'original_expression': dice_expression,
         }
-    
+
     def _validate_dice_limits(self, dice_config: Dict[str, Any]) -> None:
-        """
-        다이스 제한 검증
-        
-        Args:
-            dice_config: 다이스 설정
-            
-        Raises:
-            ValueError: 제한 초과
-        """
+        """다이스 개수·면수 제한. 위반 시 ValueError."""
         num_dice = dice_config['num_dice']
         dice_sides = dice_config['dice_sides']
-        
-        # 주사위 개수 제한
         if num_dice < 1:
             raise ValueError("주사위 개수는 1개 이상이어야 합니다.")
-        
         if num_dice > config.MAX_DICE_COUNT:
             raise ValueError(f"주사위 개수는 최대 {config.MAX_DICE_COUNT}개까지 가능합니다.")
-        
-        # 주사위 면수 제한
         if dice_sides < 2:
             raise ValueError("주사위 면수는 2면 이상이어야 합니다.")
-        
         if dice_sides > config.MAX_DICE_SIDES:
             raise ValueError(f"주사위 면수는 최대 {config.MAX_DICE_SIDES}면까지 가능합니다.")
-        
-        # 성공 기준값 검증
-        threshold = dice_config.get('threshold')
-        if threshold is not None:
-            if threshold < 1 or threshold > dice_sides:
-                raise ValueError(
-                    f"성공 기준값은 1과 {dice_sides} 사이의 숫자여야 합니다."
-                )
-    
+
     def _roll_dice(self, num_dice: int, dice_sides: int) -> List[int]:
-        """
-        주사위 굴리기
-        
-        Args:
-            num_dice: 주사위 개수
-            dice_sides: 주사위 면수
-            
-        Returns:
-            List[int]: 각 주사위 결과
-        """
-        rolls = []
-        for _ in range(num_dice):
-            roll = random.randint(1, dice_sides)
-            rolls.append(roll)
-        
+        """주사위 굴리기."""
+        rolls = [random.randint(1, dice_sides) for _ in range(num_dice)]
         logger.debug(f"주사위 굴리기: {num_dice}d{dice_sides} = {rolls}")
         return rolls
-    
+
     def _calculate_result(self, expression: str, rolls: List[int], dice_config: Dict[str, Any]) -> DiceResult:
-        """
-        다이스 결과 계산
-
-        Args:
-            expression: 원본 다이스 표현식
-            rolls: 주사위 결과들
-            dice_config: 다이스 설정
-
-        Returns:
-            DiceResult: 계산된 결과
-        """
+        """합계 계산 + (비교식이 있으면) 합계 기준 성공 여부. 성공이면 success_count=1."""
+        modifier = dice_config.get('modifier', 0)
         threshold = dice_config.get('threshold')
         threshold_type = dice_config.get('threshold_type')
-        modifier = dice_config.get('modifier', 0)
+        total = sum(rolls) + modifier
+        success_count = fail_count = None
+        if threshold_type:
+            success = _COMPARE[threshold_type](total, threshold)
+            success_count, fail_count = (1, 0) if success else (0, 1)
+        return create_dice_result(
+            expression=expression,
+            rolls=rolls,
+            total=total,
+            modifier=modifier,
+            threshold=threshold,
+            threshold_type=threshold_type,
+            success_count=success_count,
+            fail_count=fail_count,
+        )
 
-        # 성공/실패 개수 계산
-        success_count = None
-        fail_count = None
-
-        if threshold is not None and threshold_type:
-            success_count = 0
-            for roll in rolls:
-                if threshold_type == '<' and roll <= threshold:
-                    success_count += 1
-                elif threshold_type == '>' and roll >= threshold:
-                    success_count += 1
-
-            fail_count = len(rolls) - success_count
-
-        # DiceResult 객체 생성
-        try:
-            return create_dice_result(
-                expression=expression,
-                rolls=rolls,
-                modifier=modifier,
-                threshold=threshold,
-                threshold_type=threshold_type
-            )
-        except Exception as e:
-            logger.warning("DiceResult 생성 실패, 더미 객체 사용: %s", e)
-            # create_dice_result가 없는 경우 더미 객체
-            class DummyDiceResult:
-                def __init__(self):
-                    self.expression = expression
-                    self.rolls = rolls
-                    self.modifier = modifier
-                    self.total = sum(rolls) + modifier
-                    self.threshold = threshold
-                    self.threshold_type = threshold_type
-                    self.success_count = success_count
-                    self.fail_count = fail_count
-                    self.has_threshold = threshold is not None
-
-                def is_success(self):
-                    if not self.has_threshold or len(self.rolls) != 1:
-                        return None
-                    roll_value = self.rolls[0] + self.modifier
-                    if self.threshold_type == '<':
-                        return roll_value <= self.threshold
-                    elif self.threshold_type == '>':
-                        return roll_value >= self.threshold
-                    return None
-
-            return DummyDiceResult()
-    
     def _format_result_message(self, dice_result) -> str:
         """
-        결과 메시지 포맷팅 (개선된 버전)
+        다이스 결과 (CoC 판정과 같은 `➤` 형식):
 
-        Args:
-            dice_result: 다이스 결과
-
-        Returns:
-            str: 포맷된 결과 메시지
+            2D6+1>=7
+            ➤ 8[4,4]+1
+            ➤ 9
+            ➤ 성공
         """
-        expression = getattr(dice_result, 'expression', '')
-        rolls = dice_result.rolls
-        modifier = getattr(dice_result, 'modifier', 0)
+        config_match = DICE_EXPRESSION_RE.match(compact(dice_result.expression))
+        num_dice, dice_sides = config_match.group(1), config_match.group(2)
+        modifier = dice_result.modifier
+        head = f"{num_dice}D{dice_sides}" + (f"{modifier:+d}" if modifier else "")
+        if dice_result.threshold_type:
+            head += f"{dice_result.threshold_type}{dice_result.threshold}"
+        rolled = f"{sum(dice_result.rolls)}[{','.join(str(r) for r in dice_result.rolls)}]"
+        rolled += f"{modifier:+d}" if modifier else ""
+        lines = [head, f"➤ {rolled}", f"➤ {dice_result.total}"]
+        if dice_result.threshold_type:
+            lines.append("➤ 성공" if dice_result.success_count else "➤ 실패")
+        return "\n".join(lines)
 
-        # 시각적 개선
-        if len(rolls) == 1:
-            # 단일 주사위
-            result_value = rolls[0]
-
-            # 보정값이 있으면 표시
-            if modifier != 0:
-                modifier_str = f"{modifier:+d}"  # +5 또는 -3 형식
-                total_value = result_value + modifier
-
-                if hasattr(dice_result, 'has_threshold') and dice_result.has_threshold:
-                    # 성공/실패 조건이 있는 경우
-                    success = dice_result.is_success() if hasattr(dice_result, 'is_success') else None
-                    if success is not None:
-                        result_text = "[성공]" if success else "[실패]"
-                        return f"{result_value}{modifier_str} = {total_value} {result_text}"
-                    else:
-                        return f"{result_value}{modifier_str} = {total_value}"
-                else:
-                    # 일반 단일 주사위 + 보정값
-                    return f"{result_value}{modifier_str} = {total_value}"
-            else:
-                # 보정값 없음
-                if hasattr(dice_result, 'has_threshold') and dice_result.has_threshold:
-                    # 성공/실패 조건이 있는 경우
-                    success = dice_result.is_success() if hasattr(dice_result, 'is_success') else None
-                    if success is not None:
-                        result_text = "[성공]" if success else "[실패]"
-                        return f"{result_value} {result_text}"
-                    else:
-                        return f"{result_value}"
-                else:
-                    # 일반 단일 주사위
-                    return f"{result_value}"
-        else:
-            # 복수 주사위
-            rolls_str = ", ".join(str(roll) for roll in rolls)
-            rolls_sum = sum(rolls)
-
-            # 보정값이 있으면 표시
-            if modifier != 0:
-                modifier_str = f"{modifier:+d}"
-                total = rolls_sum + modifier
-
-                if hasattr(dice_result, 'has_threshold') and dice_result.has_threshold and dice_result.success_count is not None:
-                    # 성공/실패 조건이 있는 경우
-                    success_text = "[성공]" if dice_result.success_count > 0 else "[실패]"
-                    return f"{rolls_str}{modifier_str}\n합계: {total} {success_text} 성공: {dice_result.success_count}개, 실패: {dice_result.fail_count}개"
-                else:
-                    # 일반 복수 주사위 + 보정값
-                    return f"{rolls_str}{modifier_str}\n합계: {total}"
-            else:
-                # 보정값 없음
-                if hasattr(dice_result, 'has_threshold') and dice_result.has_threshold and dice_result.success_count is not None:
-                    # 성공/실패 조건이 있는 경우
-                    success_text = "[성공]" if dice_result.success_count > 0 else "[실패]"
-                    return f"{rolls_str}\n{success_text} 성공: {dice_result.success_count}개, 실패: {dice_result.fail_count}개"
-                else:
-                    # 일반 복수 주사위
-                    return f"{rolls_str}\n합계: {rolls_sum}"
-    
     def validate_context(self, context: CommandContext) -> Optional[str]:
         """컨텍스트 유효성 검증 (오버라이드)"""
         # 기본 검증
@@ -515,9 +340,8 @@ def is_dice_command(keyword: str) -> bool:
     if keyword in ['다이스', 'dice']:
         return True
 
-    # 직접 다이스 표현식 (예: "2d6", "1d20+5", "1d100<50")
-    dice_pattern = re.compile(r'^\d+[dD]\d+([\+\-]\d+)?([<>]\d+)?$')
-    return bool(dice_pattern.match(keyword))
+    # 직접 다이스 표현식 (예: "2d6", "1d20+5", "1d100<=50")
+    return is_dice_expression(keyword)
 
 
 def extract_dice_from_text(text: str) -> List[str]:
@@ -530,7 +354,7 @@ def extract_dice_from_text(text: str) -> List[str]:
     Returns:
         List[str]: 발견된 다이스 표현식들
     """
-    dice_pattern = re.compile(r'\b\d+[dD]\d+([\+\-]\d+)?([<>]\d+)?\b')
+    dice_pattern = re.compile(r'\b\d+[dD]\d+(?:[+-]\d+)?(?:(?:<=|>=|<>|<|>|=)-?\d+)?\b')
     return dice_pattern.findall(text)
 
 
