@@ -1,5 +1,5 @@
 # 마스토돈 API
-Mastodon.py==1.8.1
+Mastodon.py==2.3.3
 
 # Google Sheets API
 gspread==6.1.4
